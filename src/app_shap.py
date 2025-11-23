@@ -1,5 +1,6 @@
 import os
 import time
+import pickle
 from typing import List
 
 import numpy as np
@@ -23,6 +24,53 @@ def infer_lipid_columns(df: pd.DataFrame) -> List[str]:
         'pred_adrenal_insufficiency',
     }
     return [c for c in df.columns if c not in meta_cols]
+
+
+REFMET_MAP_PATH = "refmet_map.pkl"
+
+
+@st.cache_data(show_spinner=False)
+def load_refmet_map() -> dict:
+    """
+    Load a cached mapping from RefMet ID to metadata (including KEGG ID).
+    If the pickle does not exist yet, download from Metabolomics Workbench,
+    construct the mapping, persist to disk, and return it.
+    """
+    if os.path.exists(REFMET_MAP_PATH):
+        try:
+            with open(REFMET_MAP_PATH, "rb") as f:
+                return pickle.load(f)
+        except Exception:
+            # Fall back to re-downloading if the pickle is corrupted
+            pass
+
+    url = "https://metabolomicsworkbench.org/rest/refmet/all_ids"
+    try:
+        resp = requests.get(url, timeout=120)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception:
+        return {}
+
+    # Expected shape: {"Row1": {...}, "Row2": {...}, ...}
+    refmet_map: dict[str, dict] = {}
+    if isinstance(data, dict):
+        for _, rec in data.items():
+            if not isinstance(rec, dict):
+                continue
+            rid = rec.get("refmet_id")
+            if isinstance(rid, str) and rid:
+                refmet_map[rid] = rec
+
+    # Persist to disk for re-use across runs
+    try:
+        with open(REFMET_MAP_PATH, "wb") as f:
+            pickle.dump(refmet_map, f)
+    except Exception:
+        # If saving fails, we still return the in-memory mapping
+        pass
+
+    return refmet_map
 
 
 def compute_per_fold_means(df: pd.DataFrame) -> pd.DataFrame:
@@ -104,6 +152,13 @@ def get_refmet_info(lipid_name: str):
             break
     if not refmet_id:
         return None
+
+    # First try to use the preloaded RefMet map (fast, contains KEGG IDs, etc.)
+    refmet_map = load_refmet_map()
+    if isinstance(refmet_map, dict) and refmet_id in refmet_map:
+        return refmet_map[refmet_id]
+
+    # Fallback: query detailed RefMet record via API
     detail_url = f"{base_url}/refmet_id/{refmet_id}/all"
     try:
         detail_resp = requests.get(detail_url, timeout=10)
@@ -111,7 +166,11 @@ def get_refmet_info(lipid_name: str):
         detail_data = detail_resp.json()
         records = _normalize_records(detail_data)
         if records:
-            return records[0]
+            rec = records[0]
+            # Augment with refmet_id for downstream mapping
+            if "refmet_id" not in rec:
+                rec["refmet_id"] = refmet_id
+            return rec
     except Exception:
         return None
     return None
@@ -209,6 +268,69 @@ def get_study_title(study_id: str) -> str | None:
         return None
     except Exception:
         return None
+
+
+@st.cache_data(show_spinner=False)
+def get_kegg_pathways(kegg_id: str) -> pd.DataFrame | None:
+    """
+    Retrieve KEGG pathways involving a compound (by KEGG ID, e.g. 'C00422').
+    Uses KEGG REST:
+      - link/pathway/cpd:{kegg_id} to get pathway IDs
+      - list/{pathway_ids} to get pathway descriptions
+    """
+    if not kegg_id:
+        return None
+    kegg_id = kegg_id.strip()
+    base_url = "https://rest.kegg.jp"
+
+    # Step 1: link compound to pathways
+    link_url = f"{base_url}/link/pathway/cpd:{kegg_id}"
+    try:
+        resp = requests.get(link_url, timeout=15)
+        resp.raise_for_status()
+        lines = resp.text.strip().splitlines()
+    except Exception:
+        return None
+
+    pathway_ids: list[str] = []
+    for line in lines:
+        if "\t" not in line:
+            continue
+        _, path_id = line.split("\t", 1)
+        path_id = path_id.strip()
+        if path_id:
+            pathway_ids.append(path_id)
+
+    if not pathway_ids:
+        return None
+
+    pathway_ids = sorted(set(pathway_ids))
+
+    # Step 2: get pathway names/descriptions
+    joined_ids = "+".join(pathway_ids)
+    list_url = f"{base_url}/list/{joined_ids}"
+    try:
+        # Small delay to be gentle with the API when called repeatedly
+        time.sleep(0.2)
+        resp2 = requests.get(list_url, timeout=15)
+        resp2.raise_for_status()
+        lines2 = resp2.text.strip().splitlines()
+    except Exception:
+        return None
+
+    rows = []
+    for line in lines2:
+        if "\t" not in line:
+            continue
+        pid, desc = line.split("\t", 1)
+        rows.append({"pathway_id": pid.strip(), "description": desc.strip()})
+
+    if not rows:
+        return None
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return None
+    return df
 
 
 st.set_page_config(layout="wide", page_title="SHAP Lipid Importance")
@@ -425,6 +547,20 @@ else:
                     studies_df = studies_df.copy()
                     studies_df["Title"] = studies_df[id_col].astype(str).map(titles)
 
+                # KEGG pathways from kegg_id (if available). The KEGG ID is the same
+                # for all rows here, so we can just use the first non-null value.
+                pw_df = None
+                if "kegg_id" in studies_df.columns:
+                    non_null_kegg = studies_df["kegg_id"].dropna().astype(str)
+                    if not non_null_kegg.empty:
+                        kid = non_null_kegg.iloc[0]
+                        # Small delay; results are cached so repeated calls are cheap
+                        time.sleep(0.2)
+                        p = get_kegg_pathways(kid)
+                        if p is not None and not p.empty:
+                            pw_df = p.copy()
+                            pw_df["kegg_id"] = kid
+
                 # Show a concise subset if many columns; otherwise show all
                 preferred_cols_order = [
                     "study_id",
@@ -441,5 +577,13 @@ else:
                 else:
                     display_df = studies_df
                 st.table(display_df)
+
+                if pw_df is not None and not pw_df.empty:
+                    st.subheader("KEGG pathways for associated KEGG IDs")
+                    pw_cols_order = ["kegg_id", "pathway_id", "description"]
+                    pw_cols = [c for c in pw_cols_order if c in pw_df.columns]
+                    if not pw_cols:
+                        pw_cols = list(pw_df.columns)
+                    st.table(pw_df[pw_cols])
 
 
