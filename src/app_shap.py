@@ -1,4 +1,5 @@
 import os
+import time
 from typing import List
 
 import numpy as np
@@ -44,6 +45,14 @@ def compute_per_fold_means(df: pd.DataFrame) -> pd.DataFrame:
                 }
             )
     return pd.DataFrame(results)
+
+
+@st.cache_data(show_spinner=False)
+def load_lipid_data() -> pd.DataFrame:
+    """Load original lipidomics data (with ':' in lipid names)."""
+    file_path = "data/SupplementaryData1-with-age.xlsx"
+    sheet_name = "lipidomics_data_males"
+    return pd.read_excel(file_path, sheet_name=sheet_name)
 
 
 @st.cache_data(show_spinner=False)
@@ -106,6 +115,100 @@ def get_refmet_info(lipid_name: str):
     except Exception:
         return None
     return None
+
+
+@st.cache_data(show_spinner=False)
+def get_refmet_studies(refmet_name: str):
+    """
+    Retrieve studies mentioning a given RefMet name using the Metabolomics Workbench API.
+    Returns a DataFrame or None if nothing is found.
+    """
+    base_url = "https://metabolomicsworkbench.org/rest/study/refmet_name"
+    refmet_name = (refmet_name or "").strip()
+    # Keep ':', ';', and parentheses unescaped; spaces will become %20
+    encoded_name = urllib.parse.quote(refmet_name, safe=":;()")
+    # JSON-like dict-of-dicts endpoint (easier to parse)
+    url = f"{base_url}/{encoded_name}/data/"
+
+    def _records_from_json(obj):
+        """
+        Normalize various JSON shapes into list-of-dict records.
+        Expected shape here is dict-of-dicts with numeric keys:
+        {"1": {...}, "2": {...}, ...}
+        """
+        if obj is None:
+            return []
+        if isinstance(obj, list):
+            return [x for x in obj if isinstance(x, dict)]
+        if isinstance(obj, dict):
+            # dict-of-dicts with numeric keys
+            if all(isinstance(k, str) and k.isdigit() for k in obj.keys()):
+                return [obj[k] for k in sorted(obj.keys(), key=lambda x: int(x)) if isinstance(obj[k], dict)]
+            return [obj]
+        return []
+
+    try:
+        resp = requests.get(url, timeout=15)
+        status = resp.status_code
+        text = resp.text
+        try:
+            resp.raise_for_status()
+        except Exception:
+            return {"df": None, "url": url, "status": status, "raw": text}
+
+        try:
+            data = resp.json()
+        except Exception:
+            return {"df": None, "url": url, "status": status, "raw": text}
+
+        records = _records_from_json(data)
+        if not records:
+            return {"df": None, "url": url, "status": status, "raw": data}
+        df = pd.DataFrame(records)
+        if df.empty:
+            return {"df": None, "url": url, "status": status, "raw": data}
+        return {"df": df, "url": url, "status": status, "raw": data}
+    except Exception as e:
+        return {"df": None, "url": url, "status": None, "raw": str(e)}
+
+
+@st.cache_data(show_spinner=False)
+def get_study_title(study_id: str) -> str | None:
+    """
+    Retrieve study title for a given Metabolomics Workbench study ID.
+    """
+    if not study_id:
+        return None
+    base_url = "https://metabolomicsworkbench.org/rest/study/study_id"
+    url = f"{base_url}/{study_id}/summary"
+
+    def _records_from_json(obj):
+        if obj is None:
+            return []
+        if isinstance(obj, list):
+            return [x for x in obj if isinstance(x, dict)]
+        if isinstance(obj, dict):
+            # dict-of-dicts with numeric keys
+            if all(isinstance(k, str) and k.isdigit() for k in obj.keys()):
+                return [obj[k] for k in sorted(obj.keys(), key=lambda x: int(x)) if isinstance(obj[k], dict)]
+            return [obj]
+        return []
+
+    try:
+        resp = requests.get(url, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        records = _records_from_json(data)
+        if not records:
+            return None
+        rec = records[0]
+        # Try several title-like keys
+        for key in ["Title", "Study Title", "study_title", "title"]:
+            if key in rec and isinstance(rec[key], str) and rec[key].strip():
+                return rec[key].strip()
+        return None
+    except Exception:
+        return None
 
 
 st.set_page_config(layout="wide", page_title="SHAP Lipid Importance")
@@ -202,17 +305,40 @@ with left_col:
                         else:
                             vals_df = vals_df.rename(columns={lipid_part: "shap_value"})
                             vals_df["sample_id"] = vals_df["sample_id"].astype(str)
+                            # Attach original lipid concentration values from Excel, if available
+                            try:
+                                lipid_excel_name = lipid_part.replace("_", ":")
+                                lipid_df = load_lipid_data()
+                                if "Sample ID" in lipid_df.columns and lipid_excel_name in lipid_df.columns:
+                                    meta_df = lipid_df[["Sample ID", lipid_excel_name]].rename(
+                                        columns={"Sample ID": "sample_id", lipid_excel_name: "lipid_value"}
+                                    )
+                                    vals_df = vals_df.merge(meta_df, on="sample_id", how="left")
+                            except Exception:
+                                # If anything goes wrong, just fall back to plotting without color
+                                pass
                             # Create small vertical jitter so points don't overlap on a single y level
                             seed = abs(hash(f"{lipid_part}-{fold_value}")) % (2**32)
                             rng = np.random.default_rng(seed)
                             vals_df = vals_df.copy()
                             vals_df["jitter"] = rng.uniform(-0.3, 0.3, size=len(vals_df))
-                            fig2 = px.scatter(vals_df,
-                                              x="shap_value",
-                                              y="jitter",
-                                              hover_data=["sample_id"],
-                                              labels={"shap_value": "SHAP value"},
-                                              title=None)
+                            color_kwargs = {}
+                            hover_cols = ["sample_id"]
+                            if "lipid_value" in vals_df.columns:
+                                color_kwargs = {
+                                    "color": "lipid_value",
+                                    "color_continuous_scale": "Bluered",
+                                }
+                                hover_cols.append("lipid_value")
+                            fig2 = px.scatter(
+                                vals_df,
+                                x="shap_value",
+                                y="jitter",
+                                hover_data=hover_cols,
+                                labels={"shap_value": "SHAP value"},
+                                title=None,
+                                **color_kwargs,
+                            )
                             fig2.update_traces(marker=dict(size=8, opacity=0.8))
                             fig2.update_yaxes(showticklabels=False, title=None, showgrid=False, zeroline=False)
                             fig2.update_xaxes(range=[-1.1, 1.1])
@@ -249,20 +375,71 @@ with right_col:
         title = st.session_state.get("corr_title", "Top correlated lipids (Spearman)")
         st.subheader(title)
         st.table(corr_table)
-
-# --- RefMet annotation section (below both panes) ---
-st.divider()
-st.header("RefMet annotation")
-selected_api_name = st.session_state.get("selected_lipid_api")
-if selected_api_name:
-    with st.spinner(f"Querying RefMet for '{selected_api_name}'..."):
-        info = get_refmet_info(selected_api_name)
-    if info:
-        df_info = pd.DataFrame([info])
-        st.table(df_info)
+    st.subheader("RefMet annotation")
+    selected_api_name = st.session_state.get("selected_lipid_api")
+    if selected_api_name:
+        with st.spinner(f"Querying RefMet for '{selected_api_name}'..."):
+            info = get_refmet_info(selected_api_name)
+        if info:
+            df_info = pd.DataFrame([info])
+            # Remember last RefMet record for use below
+            st.session_state["last_refmet_info"] = info
+            st.table(df_info)
+        else:
+            st.info("No RefMet match found or API unavailable.")
     else:
-        st.info("No RefMet match found or API unavailable.")
+        st.caption("Select a lipid-fold on the left to see RefMet details here.")
+
+# --- Studies mentioning the selected lipid ---
+st.divider()
+st.header("Studies mentioning this lipid")
+refmet_info = st.session_state.get("last_refmet_info")
+if not refmet_info:
+    st.caption("Select a lipid-fold and ensure a RefMet match is available to see related studies.")
 else:
-    st.caption("Select a lipid-fold above to see RefMet details here.")
+    refmet_name = refmet_info.get("name") or st.session_state.get("selected_lipid_api")
+    if not isinstance(refmet_name, str) or not refmet_name:
+        st.caption("No valid RefMet name available for study lookup.")
+    else:
+        with st.spinner(f"Querying studies for RefMet name '{refmet_name}'..."):
+            result = get_refmet_studies(refmet_name)
+        if not result:
+            st.info("No studies found mentioning this lipid (or API unavailable).")
+        else:
+            studies_df = result.get("df")
+            if studies_df is None or studies_df.empty:
+                st.info("No parsable study table found in response.")
+            else:
+                # Enrich with study titles using the study_id column
+                id_col = None
+                for cand in ["study_id", "STUDY_ID"]:
+                    if cand in studies_df.columns:
+                        id_col = cand
+                        break
+                if id_col is not None:
+                    titles = {}
+                    for sid in sorted(studies_df[id_col].dropna().astype(str).unique()):
+                        # Small delay to avoid hammering the API
+                        time.sleep(0.2)
+                        titles[sid] = get_study_title(sid)
+                    studies_df = studies_df.copy()
+                    studies_df["Title"] = studies_df[id_col].astype(str).map(titles)
+
+                # Show a concise subset if many columns; otherwise show all
+                preferred_cols_order = [
+                    "study_id",
+                    "STUDY_ID",
+                    "kegg_id",
+                    "Title",
+                    "Principal Investigator",
+                    "Species",
+                    "Study Type",
+                ]
+                preferred_cols = [c for c in preferred_cols_order if c in studies_df.columns]
+                if preferred_cols:
+                    display_df = studies_df[preferred_cols]
+                else:
+                    display_df = studies_df
+                st.table(display_df)
 
 
