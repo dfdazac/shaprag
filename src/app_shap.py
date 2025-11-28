@@ -573,8 +573,7 @@ else:
     else:
         all_studies: list[pd.DataFrame] = []
         total_refmets = len(refmet_records)
-        progress = st.progress(0.0) if total_refmets > 1 else None
-        status = st.empty() if progress is not None else None
+
         with st.spinner("Retrieving studies for matched RefMet lipids..."):
             for idx, rec in enumerate(refmet_records, start=1):
                 refmet_name = rec.get("name")
@@ -590,21 +589,16 @@ else:
                 # Track which RefMet name each study row came from
                 studies_df_single["Lipid name"] = refmet_name
                 all_studies.append(studies_df_single)
-                if progress is not None:
-                    progress.progress(min(idx / total_refmets, 1.0))
-                if status is not None:
-                    status.caption(
-                        f"Retrieved studies for {idx} of {total_refmets} RefMet lipid names..."
-                    )
-        if progress is not None:
-            progress.empty()
-        if status is not None:
-            status.empty()
 
         if not all_studies:
             st.info("No studies found mentioning these lipids (or API unavailable).")
         else:
             studies_df = pd.concat(all_studies, ignore_index=True)
+            # Limit to at most 50 rows as early as possible to keep downstream
+            # lookups and rendering lightweight.
+            max_study_rows = 50
+            if len(studies_df) > max_study_rows:
+                studies_df = studies_df.head(max_study_rows)
 
             # Enrich with study titles using the study_id column
             id_col = None
@@ -615,6 +609,7 @@ else:
             if id_col is not None:
                 titles = {}
                 sids = sorted(studies_df[id_col].dropna().astype(str).unique())
+                # Cap the number of study titles to retrieve to avoid excessive API calls
                 n_titles = len(sids)
                 title_progress = st.progress(0.0) if n_titles > 1 else None
                 with st.spinner("Fetching titles for Metabolomics Workbench studies..."):
@@ -708,7 +703,8 @@ else:
                 st.session_state["last_pathways_df"] = pw_df if pw_df is not None else None
 
                 if pw_df is not None and not pw_df.empty:
-                    pw_cols_order = ["Lipid name", "kegg_id", "pathway_id", "description"]
+                    # Display only selected columns for the KEGG pathways table
+                    pw_cols_order = ["kegg_id", "pathway_id", "description"]
                     pw_cols = [c for c in pw_cols_order if c in pw_df.columns]
                     if not pw_cols:
                         pw_cols = list(pw_df.columns)
@@ -777,7 +773,7 @@ else:
             pathways_text = " | ".join(pw_rows)
 
     prompt = f"""
-You are assisting with interpretation of lipidomic SHAP feature importance for adrenal insufficiency in ALD.
+You are assisting with interpretation of lipidomic SHAP feature importance for predicting the presence of adrenal insufficiency in patients with ALD.
 
 Lipid of interest: {lipid_name}
 RefMet classes:
@@ -795,11 +791,11 @@ Relevant Metabolomics Workbench studies (study id, title, species):
 KEGG pathways involving this lipid (pathway id: description):
 {pathways_text}
 
-Write a single, concise paragraph (3–6 sentences) summarizing:
+Write a brief text summarizing the results in the following sections:
 - what type of lipid this is and its likely biological role,
-- how its SHAP importance and correlations might relate to adrenal insufficiency or ALD pathology,
+- how its SHAP importance and correlations might relate to adrenal insufficiency,
 - and how the listed studies and pathways could contextualize or support these interpretations.
-Avoid speculation that is not grounded in the provided information; when extrapolating, use cautious language ("may", "could", "suggests").
+Avoid speculation that is not grounded in the provided information; when extrapolating, use cautious language ("may", "could", "suggests"). The overall goal is to contextualize the lipid of interest in the context of adrenal insufficiency in ALD.
 """
 
     if st.button("Generate summary with language model"):
