@@ -28,53 +28,6 @@ def infer_lipid_columns(df: pd.DataFrame) -> List[str]:
     return [c for c in df.columns if c not in meta_cols]
 
 
-REFMET_MAP_PATH = "refmet_map.pkl"
-
-
-@st.cache_data(show_spinner=False)
-def load_refmet_map() -> dict:
-    """
-    Load a cached mapping from RefMet ID to metadata (including KEGG ID).
-    If the pickle does not exist yet, download from Metabolomics Workbench,
-    construct the mapping, persist to disk, and return it.
-    """
-    if os.path.exists(REFMET_MAP_PATH):
-        try:
-            with open(REFMET_MAP_PATH, "rb") as f:
-                return pickle.load(f)
-        except Exception:
-            # Fall back to re-downloading if the pickle is corrupted
-            pass
-
-    url = "https://metabolomicsworkbench.org/rest/refmet/all_ids"
-    try:
-        resp = requests.get(url, timeout=120)
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception:
-        return {}
-
-    # Expected shape: {"Row1": {...}, "Row2": {...}, ...}
-    refmet_map: dict[str, dict] = {}
-    if isinstance(data, dict):
-        for _, rec in data.items():
-            if not isinstance(rec, dict):
-                continue
-            rid = rec.get("refmet_id")
-            if isinstance(rid, str) and rid:
-                refmet_map[rid] = rec
-
-    # Persist to disk for re-use across runs
-    try:
-        with open(REFMET_MAP_PATH, "wb") as f:
-            pickle.dump(refmet_map, f)
-    except Exception:
-        # If saving fails, we still return the in-memory mapping
-        pass
-
-    return refmet_map
-
-
 def compute_per_fold_means(df: pd.DataFrame) -> pd.DataFrame:
     lipid_cols = infer_lipid_columns(df)
     results = []
@@ -176,11 +129,6 @@ def get_refmet_info(lipid_name: str):
                 break
         if not refmet_id:
             return None
-
-        # First try to use the preloaded RefMet map (fast, contains KEGG IDs, etc.)
-        refmet_map = load_refmet_map()
-        if isinstance(refmet_map, dict) and refmet_id in refmet_map:
-            return refmet_map[refmet_id]
 
         # Fallback: query detailed RefMet record via API
         detail_url = f"{base_url}/refmet_id/{refmet_id}/all"
@@ -590,21 +538,34 @@ else:
         st.caption("No valid RefMet record available for study lookup.")
     else:
         all_studies: list[pd.DataFrame] = []
-        for rec in refmet_records:
-            refmet_name = rec.get("name")
-            if not isinstance(refmet_name, str) or not refmet_name.strip():
-                continue
-            with st.spinner(f"Querying studies for RefMet name '{refmet_name}'..."):
+        total_refmets = len(refmet_records)
+        progress = st.progress(0.0) if total_refmets > 1 else None
+        status = st.empty() if progress is not None else None
+        with st.spinner("Retrieving studies for matched RefMet lipids..."):
+            for idx, rec in enumerate(refmet_records, start=1):
+                refmet_name = rec.get("name")
+                if not isinstance(refmet_name, str) or not refmet_name.strip():
+                    continue
                 result = get_refmet_studies(refmet_name)
-            if not result:
-                continue
-            studies_df_single = result.get("df")
-            if studies_df_single is None or studies_df_single.empty:
-                continue
-            studies_df_single = studies_df_single.copy()
-            # Track which RefMet name each study row came from
-            studies_df_single["Lipid name"] = refmet_name
-            all_studies.append(studies_df_single)
+                if not result:
+                    continue
+                studies_df_single = result.get("df")
+                if studies_df_single is None or studies_df_single.empty:
+                    continue
+                studies_df_single = studies_df_single.copy()
+                # Track which RefMet name each study row came from
+                studies_df_single["Lipid name"] = refmet_name
+                all_studies.append(studies_df_single)
+                if progress is not None:
+                    progress.progress(min(idx / total_refmets, 1.0))
+                if status is not None:
+                    status.caption(
+                        f"Retrieved studies for {idx} of {total_refmets} RefMet lipid names..."
+                    )
+        if progress is not None:
+            progress.empty()
+        if status is not None:
+            status.empty()
 
         if not all_studies:
             st.info("No studies found mentioning these lipids (or API unavailable).")
@@ -619,35 +580,18 @@ else:
                     break
             if id_col is not None:
                 titles = {}
-                for sid in sorted(studies_df[id_col].dropna().astype(str).unique()):
-                    titles[sid] = get_study_title(sid)
+                sids = sorted(studies_df[id_col].dropna().astype(str).unique())
+                n_titles = len(sids)
+                title_progress = st.progress(0.0) if n_titles > 1 else None
+                with st.spinner("Fetching titles for Metabolomics Workbench studies..."):
+                    for i, sid in enumerate(sids, start=1):
+                        titles[sid] = get_study_title(sid)
+                        if title_progress is not None:
+                            title_progress.progress(min(i / n_titles, 1.0))
+                if title_progress is not None:
+                    title_progress.empty()
                 studies_df = studies_df.copy()
                 studies_df["Title"] = studies_df[id_col].astype(str).map(titles)
-
-            # KEGG pathways from kegg_id (if available). We query per (lipid, kegg_id)
-            # pair so we can keep track of which lipid each pathway is associated with.
-            pw_df = None
-            if "kegg_id" in studies_df.columns:
-                pw_frames: list[pd.DataFrame] = []
-                kegg_pairs = (
-                    studies_df[["Lipid name", "kegg_id"]]
-                    .dropna()
-                    .astype(str)
-                    .drop_duplicates()
-                    .itertuples(index=False, name=None)
-                )
-                for lipid_nm, kid in kegg_pairs:
-                    if not kid:
-                        continue
-                    p = get_kegg_pathways(kid)
-                    if p is None or p.empty:
-                        continue
-                    tmp = p.copy()
-                    tmp["kegg_id"] = kid
-                    tmp["Lipid name"] = lipid_nm
-                    pw_frames.append(tmp)
-                if pw_frames:
-                    pw_df = pd.concat(pw_frames, ignore_index=True)
 
             # Show a concise subset if many columns; otherwise show all
             preferred_cols_order = [
@@ -668,7 +612,7 @@ else:
 
             # Simple pagination for the studies table
             total_rows = len(display_df)
-            page_size = 25
+            page_size = 10
             total_pages = max(1, (total_rows + page_size - 1) // page_size)
             if total_pages > 1:
                 page = st.number_input(
@@ -691,6 +635,41 @@ else:
 
             # Store for downstream summary generation (use full, unpaginated table)
             st.session_state["last_studies_df"] = display_df
+
+            # KEGG pathways from kegg_id (if available). We query per (lipid, kegg_id)
+            # pair so we can keep track of which lipid each pathway is associated with.
+            pw_df = None
+            if "kegg_id" in studies_df.columns:
+                pw_frames: list[pd.DataFrame] = []
+                kegg_pairs = list(
+                    studies_df[["Lipid name", "kegg_id"]]
+                    .dropna()
+                    .astype(str)
+                    .drop_duplicates()
+                    .itertuples(index=False, name=None)
+                )
+                n_pairs = len(kegg_pairs)
+                kegg_progress = st.progress(0.0) if n_pairs > 0 else None
+                with st.spinner("Retrieving KEGG pathways for associated KEGG IDs..."):
+                    for i, (lipid_nm, kid) in enumerate(kegg_pairs, start=1):
+                        if not kid:
+                            continue
+                        p = get_kegg_pathways(kid)
+                        if p is None or p.empty:
+                            if kegg_progress is not None:
+                                kegg_progress.progress(min(i / n_pairs, 1.0))
+                            continue
+                        tmp = p.copy()
+                        tmp["kegg_id"] = kid
+                        tmp["Lipid name"] = lipid_nm
+                        pw_frames.append(tmp)
+                        if kegg_progress is not None:
+                            kegg_progress.progress(min(i / n_pairs, 1.0))
+                if kegg_progress is not None:
+                    kegg_progress.empty()
+                if pw_frames:
+                    pw_df = pd.concat(pw_frames, ignore_index=True)
+
             st.session_state["last_pathways_df"] = pw_df if pw_df is not None else None
 
             if pw_df is not None and not pw_df.empty:
