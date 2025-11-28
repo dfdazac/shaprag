@@ -4,6 +4,7 @@ import pickle
 from typing import List
 
 import numpy as np
+import openai
 import pandas as pd
 import plotly.express as px
 import streamlit as st
@@ -578,6 +579,10 @@ else:
                     display_df = studies_df
                 st.table(display_df)
 
+                # Store for downstream summary generation
+                st.session_state["last_studies_df"] = display_df
+                st.session_state["last_pathways_df"] = pw_df if pw_df is not None else None
+
                 if pw_df is not None and not pw_df.empty:
                     st.subheader("KEGG pathways for associated KEGG IDs")
                     pw_cols_order = ["kegg_id", "pathway_id", "description"]
@@ -586,4 +591,107 @@ else:
                         pw_cols = list(pw_df.columns)
                     st.table(pw_df[pw_cols])
 
+
+# --- Language model summary section ---
+st.divider()
+st.header("Language-model summary")
+
+api_key = os.getenv("OPENAI_API_KEY")
+if not api_key:
+    st.caption("Set the OPENAI_API_KEY environment variable to enable language-model summaries.")
+else:
+    # Gather context pieces
+    corr_table = st.session_state.get("corr_table")
+    refmet_info = st.session_state.get("last_refmet_info") or {}
+    studies_display_df = st.session_state.get("last_studies_df")
+    pathways_df = st.session_state.get("last_pathways_df")
+
+    # Build text snippets
+    corr_text = "None"
+    if corr_table is not None and not corr_table.empty:
+        rows = [f"{row['lipid']}: corr={row['corr']:.3f}" for _, row in corr_table.iterrows()]
+        corr_text = "; ".join(rows)
+
+    superclass = refmet_info.get("super_class") or refmet_info.get("superclass") or ""
+    main_class = refmet_info.get("main_class") or refmet_info.get("mainclass") or ""
+    sub_class = refmet_info.get("sub_class") or refmet_info.get("subclass") or ""
+    kegg_id = refmet_info.get("kegg_id") or ""
+    lipid_name = refmet_info.get("name") or st.session_state.get("selected_lipid_api") or ""
+
+    studies_text = "None"
+    if studies_display_df is not None and not studies_display_df.empty:
+        study_rows = []
+        for _, r in studies_display_df.iterrows():
+            sid = r.get("study_id") or r.get("STUDY_ID")
+            title = r.get("Title")
+            species = r.get("Species")
+            parts = [str(sid) if pd.notna(sid) else None,
+                     str(title) if pd.notna(title) else None,
+                     f"Species: {species}" if pd.notna(species) else None]
+            study_rows.append(", ".join([p for p in parts if p]))
+        studies_text = " | ".join(study_rows)
+
+    pathways_text = "None"
+    if pathways_df is not None and hasattr(pathways_df, "empty") and not pathways_df.empty:
+        pw_rows = []
+        for _, r in pathways_df.iterrows():
+            pid = r.get("pathway_id")
+            desc = r.get("description")
+            if pd.isna(pid) and pd.isna(desc):
+                continue
+            pw_rows.append(f"{pid}: {desc}")
+        if pw_rows:
+            pathways_text = " | ".join(pw_rows)
+
+    prompt = f"""
+You are assisting with interpretation of lipidomic SHAP feature importance for adrenal insufficiency in ALD.
+
+Lipid of interest: {lipid_name}
+RefMet classes:
+  - Super class: {superclass}
+  - Main class: {main_class}
+  - Sub class: {sub_class}
+  - KEGG ID: {kegg_id}
+
+Top correlated lipids (lipid: correlation):
+{corr_text}
+
+Relevant Metabolomics Workbench studies (study id, title, species):
+{studies_text}
+
+KEGG pathways involving this lipid (pathway id: description):
+{pathways_text}
+
+Write a single, concise paragraph (3–6 sentences) summarizing:
+- what type of lipid this is and its likely biological role,
+- how its SHAP importance and correlations might relate to adrenal insufficiency or ALD pathology,
+- and how the listed studies and pathways could contextualize or support these interpretations.
+Avoid speculation that is not grounded in the provided information; when extrapolating, use cautious language ("may", "could", "suggests").
+"""
+
+    if st.button("Generate summary with language model"):
+        try:
+            client = openai.OpenAI(
+                api_key=api_key,
+                base_url="https://ai-research-proxy.azurewebsites.net",
+            )
+            placeholder = st.empty()
+            full_text = ""
+            with st.spinner("Calling language model..."):
+                for chunk in client.chat.completions.create(
+                    model="gpt-4-turbo",
+                    messages=[{"role": "user", "content": prompt.strip()}],
+                    stream=True,
+                ):
+                    choice = chunk.choices[0]
+                    delta = getattr(choice, "delta", None)
+                    if delta is None:
+                        continue
+                    content = delta.content or ""
+                    if not content:
+                        continue
+                    full_text += content
+                    placeholder.markdown(full_text)
+        except Exception as e:
+            st.error(f"Error while calling language model: {e}")
 
