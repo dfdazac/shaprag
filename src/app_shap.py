@@ -10,6 +10,7 @@ import plotly.express as px
 import streamlit as st
 import requests
 import urllib.parse
+import re
 
 
 def infer_lipid_columns(df: pd.DataFrame) -> List[str]:
@@ -108,7 +109,12 @@ def load_lipid_data() -> pd.DataFrame:
 def get_refmet_info(lipid_name: str):
     """
     Retrieve RefMet information for a lipid (e.g. 'Cer(d41:3)').
-    Returns dict or None.
+    For standard names, returns a single dict or None.
+    For vendor-style combined ether/plasmalogen notations of the form
+    'CLASS(O+P-xx:yy)' (e.g. 'PE(O+P-44:9)'), it is converted into two
+    RefMet-style candidates 'CLASS O-xx:yy' and 'CLASS P-xx:yy', each
+    queried separately. If both exist, a list of dicts is returned; if
+    only one exists, that single dict is returned.
     """
     def _normalize_records(obj):
         # Convert various API JSON shapes into a list of record dicts
@@ -133,48 +139,89 @@ def get_refmet_info(lipid_name: str):
                 return v
         return None
 
+    def _ether_plasmalogen_candidates(name: str) -> List[str] | None:
+        """
+        Detect combined ether/plasmalogen notation of the form
+        'CLASS(O+P-xx:yy)' and convert it into two RefMet-compatible
+        candidates: 'CLASS O-xx:yy' and 'CLASS P-xx:yy'.
+        """
+        if not isinstance(name, str):
+            return None
+        m = re.match(r"^(?P<class>[A-Za-z0-9]+)\(O\+P-(?P<chain>[^)]+)\)$", name.strip())
+        if not m:
+            return None
+        cls = m.group("class")
+        chain = m.group("chain")
+        return [f"{cls} O-{chain}", f"{cls} P-{chain}"]
+
     base_url = "https://www.metabolomicsworkbench.org/rest/refmet"
-    encoded_name = urllib.parse.quote(lipid_name, safe="()")
-    match_url = f"{base_url}/match/{encoded_name}/name/"
-    try:
-        match_resp = requests.get(match_url, timeout=10)
-        match_resp.raise_for_status()
-        match_data = match_resp.json()
-    except Exception:
-        return None
-    candidates = _normalize_records(match_data)
-    if not candidates:
-        return None
-    # Find first candidate with a refmet_id
-    refmet_id = None
-    for cand in candidates:
-        refmet_id = _get_case_insensitive(cand, "refmet_id")
-        if refmet_id:
-            break
-    if not refmet_id:
+
+    def _query_single(name: str):
+        encoded_name = urllib.parse.quote(name, safe="()")
+        match_url = f"{base_url}/match/{encoded_name}/name/"
+        try:
+            match_resp = requests.get(match_url, timeout=10)
+            match_resp.raise_for_status()
+            match_data = match_resp.json()
+        except Exception:
+            return None
+        candidates = _normalize_records(match_data)
+        if not candidates:
+            return None
+        # Find first candidate with a refmet_id
+        refmet_id = None
+        for cand in candidates:
+            refmet_id = _get_case_insensitive(cand, "refmet_id")
+            if refmet_id:
+                break
+        if not refmet_id:
+            return None
+
+        # First try to use the preloaded RefMet map (fast, contains KEGG IDs, etc.)
+        refmet_map = load_refmet_map()
+        if isinstance(refmet_map, dict) and refmet_id in refmet_map:
+            return refmet_map[refmet_id]
+
+        # Fallback: query detailed RefMet record via API
+        detail_url = f"{base_url}/refmet_id/{refmet_id}/all"
+        try:
+            detail_resp = requests.get(detail_url, timeout=10)
+            detail_resp.raise_for_status()
+            detail_data = detail_resp.json()
+            records = _normalize_records(detail_data)
+            if records:
+                rec = records[0]
+                # Augment with refmet_id for downstream mapping
+                if "refmet_id" not in rec:
+                    rec["refmet_id"] = refmet_id
+                return rec
+        except Exception:
+            return None
         return None
 
-    # First try to use the preloaded RefMet map (fast, contains KEGG IDs, etc.)
-    refmet_map = load_refmet_map()
-    if isinstance(refmet_map, dict) and refmet_id in refmet_map:
-        return refmet_map[refmet_id]
+    # Build list of candidate lipid names to try. For combined ether/plasmalogen
+    # notation we try both O- and P- forms; otherwise we just use the input.
+    candidates_to_try = _ether_plasmalogen_candidates(lipid_name) or [lipid_name]
 
-    # Fallback: query detailed RefMet record via API
-    detail_url = f"{base_url}/refmet_id/{refmet_id}/all"
-    try:
-        detail_resp = requests.get(detail_url, timeout=10)
-        detail_resp.raise_for_status()
-        detail_data = detail_resp.json()
-        records = _normalize_records(detail_data)
-        if records:
-            rec = records[0]
-            # Augment with refmet_id for downstream mapping
-            if "refmet_id" not in rec:
-                rec["refmet_id"] = refmet_id
-            return rec
-    except Exception:
+    results: List[dict] = []
+    seen_refmet_ids: set[str] = set()
+    for name in candidates_to_try:
+        rec = _query_single(name)
+        if not isinstance(rec, dict):
+            continue
+        rid = str(rec.get("refmet_id") or "").strip()
+        if rid:
+            if rid in seen_refmet_ids:
+                continue
+            seen_refmet_ids.add(rid)
+        results.append(rec)
+
+    if not results:
+        # Fall back to the existing "no match" behaviour upstream.
         return None
-    return None
+    if len(results) == 1:
+        return results[0]
+    return results
 
 
 @st.cache_data(show_spinner=False)
@@ -504,10 +551,19 @@ with right_col:
         with st.spinner(f"Querying RefMet for '{selected_api_name}'..."):
             info = get_refmet_info(selected_api_name)
         if info:
-            df_info = pd.DataFrame([info])
-            # Remember last RefMet record for use below
-            st.session_state["last_refmet_info"] = info
-            st.table(df_info)
+            if isinstance(info, list):
+                records = [rec for rec in info if isinstance(rec, dict)]
+            elif isinstance(info, dict):
+                records = [info]
+            else:
+                records = []
+            if records:
+                df_info = pd.DataFrame(records)
+                # Remember last RefMet record(s) for use below
+                st.session_state["last_refmet_info"] = records
+                st.table(df_info)
+            else:
+                st.info("No RefMet match found or API response not in expected format.")
         else:
             st.info("No RefMet match found or API unavailable.")
     else:
@@ -520,76 +576,110 @@ refmet_info = st.session_state.get("last_refmet_info")
 if not refmet_info:
     st.caption("Select a lipid-fold and ensure a RefMet match is available to see related studies.")
 else:
-    refmet_name = refmet_info.get("name") or st.session_state.get("selected_lipid_api")
-    if not isinstance(refmet_name, str) or not refmet_name:
-        st.caption("No valid RefMet name available for study lookup.")
+    # Support both single-record and multi-record RefMet lookups.
+    if isinstance(refmet_info, list):
+        refmet_records = [r for r in refmet_info if isinstance(r, dict)]
+    elif isinstance(refmet_info, dict):
+        refmet_records = [refmet_info]
     else:
-        with st.spinner(f"Querying studies for RefMet name '{refmet_name}'..."):
-            result = get_refmet_studies(refmet_name)
-        if not result:
-            st.info("No studies found mentioning this lipid (or API unavailable).")
+        refmet_records = []
+
+    if not refmet_records:
+        st.caption("No valid RefMet record available for study lookup.")
+    else:
+        all_studies: list[pd.DataFrame] = []
+        for rec in refmet_records:
+            refmet_name = rec.get("name")
+            if not isinstance(refmet_name, str) or not refmet_name.strip():
+                continue
+            with st.spinner(f"Querying studies for RefMet name '{refmet_name}'..."):
+                result = get_refmet_studies(refmet_name)
+            if not result:
+                continue
+            studies_df_single = result.get("df")
+            if studies_df_single is None or studies_df_single.empty:
+                continue
+            studies_df_single = studies_df_single.copy()
+            # Track which RefMet name each study row came from
+            studies_df_single["Lipid name"] = refmet_name
+            all_studies.append(studies_df_single)
+
+        if not all_studies:
+            st.info("No studies found mentioning these lipids (or API unavailable).")
         else:
-            studies_df = result.get("df")
-            if studies_df is None or studies_df.empty:
-                st.info("No parsable study table found in response.")
+            studies_df = pd.concat(all_studies, ignore_index=True)
+
+            # Enrich with study titles using the study_id column
+            id_col = None
+            for cand in ["study_id", "STUDY_ID"]:
+                if cand in studies_df.columns:
+                    id_col = cand
+                    break
+            if id_col is not None:
+                titles = {}
+                for sid in sorted(studies_df[id_col].dropna().astype(str).unique()):
+                    # Small delay to avoid hammering the API
+                    time.sleep(0.2)
+                    titles[sid] = get_study_title(sid)
+                studies_df = studies_df.copy()
+                studies_df["Title"] = studies_df[id_col].astype(str).map(titles)
+
+            # KEGG pathways from kegg_id (if available). We query per (lipid, kegg_id)
+            # pair so we can keep track of which lipid each pathway is associated with.
+            pw_df = None
+            if "kegg_id" in studies_df.columns:
+                pw_frames: list[pd.DataFrame] = []
+                kegg_pairs = (
+                    studies_df[["Lipid name", "kegg_id"]]
+                    .dropna()
+                    .astype(str)
+                    .drop_duplicates()
+                    .itertuples(index=False, name=None)
+                )
+                for lipid_nm, kid in kegg_pairs:
+                    if not kid:
+                        continue
+                    # Small delay; results are cached so repeated calls are cheap
+                    time.sleep(0.2)
+                    p = get_kegg_pathways(kid)
+                    if p is None or p.empty:
+                        continue
+                    tmp = p.copy()
+                    tmp["kegg_id"] = kid
+                    tmp["Lipid name"] = lipid_nm
+                    pw_frames.append(tmp)
+                if pw_frames:
+                    pw_df = pd.concat(pw_frames, ignore_index=True)
+
+            # Show a concise subset if many columns; otherwise show all
+            preferred_cols_order = [
+                "Lipid name",
+                "study_id",
+                "STUDY_ID",
+                "kegg_id",
+                "Title",
+                "Principal Investigator",
+                "Species",
+                "Study Type",
+            ]
+            preferred_cols = [c for c in preferred_cols_order if c in studies_df.columns]
+            if preferred_cols:
+                display_df = studies_df[preferred_cols]
             else:
-                # Enrich with study titles using the study_id column
-                id_col = None
-                for cand in ["study_id", "STUDY_ID"]:
-                    if cand in studies_df.columns:
-                        id_col = cand
-                        break
-                if id_col is not None:
-                    titles = {}
-                    for sid in sorted(studies_df[id_col].dropna().astype(str).unique()):
-                        # Small delay to avoid hammering the API
-                        time.sleep(0.2)
-                        titles[sid] = get_study_title(sid)
-                    studies_df = studies_df.copy()
-                    studies_df["Title"] = studies_df[id_col].astype(str).map(titles)
+                display_df = studies_df
+            st.table(display_df)
 
-                # KEGG pathways from kegg_id (if available). The KEGG ID is the same
-                # for all rows here, so we can just use the first non-null value.
-                pw_df = None
-                if "kegg_id" in studies_df.columns:
-                    non_null_kegg = studies_df["kegg_id"].dropna().astype(str)
-                    if not non_null_kegg.empty:
-                        kid = non_null_kegg.iloc[0]
-                        # Small delay; results are cached so repeated calls are cheap
-                        time.sleep(0.2)
-                        p = get_kegg_pathways(kid)
-                        if p is not None and not p.empty:
-                            pw_df = p.copy()
-                            pw_df["kegg_id"] = kid
+            # Store for downstream summary generation
+            st.session_state["last_studies_df"] = display_df
+            st.session_state["last_pathways_df"] = pw_df if pw_df is not None else None
 
-                # Show a concise subset if many columns; otherwise show all
-                preferred_cols_order = [
-                    "study_id",
-                    "STUDY_ID",
-                    "kegg_id",
-                    "Title",
-                    "Principal Investigator",
-                    "Species",
-                    "Study Type",
-                ]
-                preferred_cols = [c for c in preferred_cols_order if c in studies_df.columns]
-                if preferred_cols:
-                    display_df = studies_df[preferred_cols]
-                else:
-                    display_df = studies_df
-                st.table(display_df)
-
-                # Store for downstream summary generation
-                st.session_state["last_studies_df"] = display_df
-                st.session_state["last_pathways_df"] = pw_df if pw_df is not None else None
-
-                if pw_df is not None and not pw_df.empty:
-                    st.subheader("KEGG pathways for associated KEGG IDs")
-                    pw_cols_order = ["kegg_id", "pathway_id", "description"]
-                    pw_cols = [c for c in pw_cols_order if c in pw_df.columns]
-                    if not pw_cols:
-                        pw_cols = list(pw_df.columns)
-                    st.table(pw_df[pw_cols])
+            if pw_df is not None and not pw_df.empty:
+                st.subheader("KEGG pathways for associated KEGG IDs")
+                pw_cols_order = ["Lipid name", "kegg_id", "pathway_id", "description"]
+                pw_cols = [c for c in pw_cols_order if c in pw_df.columns]
+                if not pw_cols:
+                    pw_cols = list(pw_df.columns)
+                st.table(pw_df[pw_cols])
 
 
 # --- Language model summary section ---
@@ -602,7 +692,14 @@ if not api_key:
 else:
     # Gather context pieces
     corr_table = st.session_state.get("corr_table")
-    refmet_info = st.session_state.get("last_refmet_info") or {}
+    refmet_info_any = st.session_state.get("last_refmet_info")
+    if isinstance(refmet_info_any, list):
+        refmet_info_list = [r for r in refmet_info_any if isinstance(r, dict)]
+        refmet_info = refmet_info_list[0] if refmet_info_list else {}
+    elif isinstance(refmet_info_any, dict):
+        refmet_info = refmet_info_any
+    else:
+        refmet_info = {}
     studies_display_df = st.session_state.get("last_studies_df")
     pathways_df = st.session_state.get("last_pathways_df")
 
