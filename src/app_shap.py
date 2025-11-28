@@ -302,6 +302,8 @@ def get_study_title(study_id: str) -> str | None:
         return []
 
     try:
+        # Small delay to be gentle with the API when called repeatedly.
+        time.sleep(0.2)
         resp = requests.get(url, timeout=15)
         resp.raise_for_status()
         data = resp.json()
@@ -618,8 +620,6 @@ else:
             if id_col is not None:
                 titles = {}
                 for sid in sorted(studies_df[id_col].dropna().astype(str).unique()):
-                    # Small delay to avoid hammering the API
-                    time.sleep(0.2)
                     titles[sid] = get_study_title(sid)
                 studies_df = studies_df.copy()
                 studies_df["Title"] = studies_df[id_col].astype(str).map(titles)
@@ -639,8 +639,6 @@ else:
                 for lipid_nm, kid in kegg_pairs:
                     if not kid:
                         continue
-                    # Small delay; results are cached so repeated calls are cheap
-                    time.sleep(0.2)
                     p = get_kegg_pathways(kid)
                     if p is None or p.empty:
                         continue
@@ -667,9 +665,31 @@ else:
                 display_df = studies_df[preferred_cols]
             else:
                 display_df = studies_df
-            st.table(display_df)
 
-            # Store for downstream summary generation
+            # Simple pagination for the studies table
+            total_rows = len(display_df)
+            page_size = 25
+            total_pages = max(1, (total_rows + page_size - 1) // page_size)
+            if total_pages > 1:
+                page = st.number_input(
+                    "Studies page",
+                    min_value=1,
+                    max_value=int(total_pages),
+                    value=1,
+                    step=1,
+                )
+            else:
+                page = 1
+            start = (int(page) - 1) * page_size
+            end = start + page_size
+            page_df = display_df.iloc[start:end]
+            st.caption(
+                f"Showing studies {start + 1}–{min(end, total_rows)} of {total_rows} "
+                f"(page {page}/{total_pages})"
+            )
+            st.table(page_df)
+
+            # Store for downstream summary generation (use full, unpaginated table)
             st.session_state["last_studies_df"] = display_df
             st.session_state["last_pathways_df"] = pw_df if pw_df is not None else None
 
