@@ -610,29 +610,6 @@ else:
             else:
                 display_df = studies_df
 
-            # Simple pagination for the studies table
-            total_rows = len(display_df)
-            page_size = 10
-            total_pages = max(1, (total_rows + page_size - 1) // page_size)
-            if total_pages > 1:
-                page = st.number_input(
-                    "Studies page",
-                    min_value=1,
-                    max_value=int(total_pages),
-                    value=1,
-                    step=1,
-                )
-            else:
-                page = 1
-            start = (int(page) - 1) * page_size
-            end = start + page_size
-            page_df = display_df.iloc[start:end]
-            st.caption(
-                f"Showing studies {start + 1}–{min(end, total_rows)} of {total_rows} "
-                f"(page {page}/{total_pages})"
-            )
-            st.table(page_df)
-
             # Store for downstream summary generation (use full, unpaginated table)
             st.session_state["last_studies_df"] = display_df
 
@@ -672,13 +649,43 @@ else:
 
             st.session_state["last_pathways_df"] = pw_df if pw_df is not None else None
 
-            if pw_df is not None and not pw_df.empty:
+            # Layout: studies on the left, KEGG pathways on the right
+            studies_col, pathways_col = st.columns(2)
+
+            with studies_col:
+                # Simple pagination for the studies table
+                total_rows = len(display_df)
+                page_size = 10
+                total_pages = max(1, (total_rows + page_size - 1) // page_size)
+                if total_pages > 1:
+                    page = st.number_input(
+                        "Studies page",
+                        min_value=1,
+                        max_value=int(total_pages),
+                        value=1,
+                        step=1,
+                    )
+                else:
+                    page = 1
+                start = (int(page) - 1) * page_size
+                end = start + page_size
+                page_df = display_df.iloc[start:end]
+                st.caption(
+                    f"Showing studies {start + 1}–{min(end, total_rows)} of {total_rows} "
+                    f"(page {page}/{total_pages})"
+                )
+                st.table(page_df)
+
+            with pathways_col:
                 st.subheader("KEGG pathways for associated KEGG IDs")
-                pw_cols_order = ["Lipid name", "kegg_id", "pathway_id", "description"]
-                pw_cols = [c for c in pw_cols_order if c in pw_df.columns]
-                if not pw_cols:
-                    pw_cols = list(pw_df.columns)
-                st.table(pw_df[pw_cols])
+                if pw_df is not None and not pw_df.empty:
+                    pw_cols_order = ["Lipid name", "kegg_id", "pathway_id", "description"]
+                    pw_cols = [c for c in pw_cols_order if c in pw_df.columns]
+                    if not pw_cols:
+                        pw_cols = list(pw_df.columns)
+                    st.table(pw_df[pw_cols])
+                else:
+                    st.caption("No KEGG pathways found for the associated KEGG IDs.")
 
 
 # --- Language model summary section ---
