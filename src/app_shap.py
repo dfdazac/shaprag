@@ -559,6 +559,10 @@ st.header("Studies and KEGG pathways mentioning this lipid")
 refmet_info = st.session_state.get("last_refmet_info")
 if not refmet_info:
     st.caption("Select a lipid-fold and ensure a RefMet match is available to see related studies.")
+    # Clear any previous studies/pathways so the language model does not
+    # accidentally use stale information from another lipid.
+    st.session_state["last_studies_df"] = None
+    st.session_state["last_pathways_df"] = None
 else:
     # Support both single-record and multi-record RefMet lookups.
     if isinstance(refmet_info, list):
@@ -570,6 +574,10 @@ else:
 
     if not refmet_records:
         st.caption("No valid RefMet record available for study lookup.")
+        # Clear any previous studies/pathways so the language model does not
+        # accidentally use stale information from another lipid.
+        st.session_state["last_studies_df"] = None
+        st.session_state["last_pathways_df"] = None
     else:
         all_studies: list[pd.DataFrame] = []
         total_refmets = len(refmet_records)
@@ -592,6 +600,10 @@ else:
 
         if not all_studies:
             st.info("No studies found mentioning these lipids (or API unavailable).")
+            # Clear any previous studies/pathways so the language model does not
+            # accidentally use stale information from another lipid.
+            st.session_state["last_studies_df"] = None
+            st.session_state["last_pathways_df"] = None
         else:
             studies_df = pd.concat(all_studies, ignore_index=True)
             # Limit to at most 50 rows as early as possible to keep downstream
