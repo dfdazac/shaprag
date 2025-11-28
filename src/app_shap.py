@@ -33,6 +33,7 @@ def compute_per_fold_means(df: pd.DataFrame) -> pd.DataFrame:
     results = []
     for fold, fold_df in df.groupby("fold"):
         for lipid in lipid_cols:
+            display_lipid = lipid.replace("_", ":")
             vals = fold_df[lipid].to_numpy(dtype=float)
             vals = vals[~np.isnan(vals)]
             if vals.size == 0:
@@ -42,7 +43,10 @@ def compute_per_fold_means(df: pd.DataFrame) -> pd.DataFrame:
             results.append(
                 {
                     "fold": int(fold),
-                    "lipid": lipid,
+                    # Keep internal (CSV) name with underscores for lookups
+                    "lipid_internal": lipid,
+                    # Use display-friendly name with ':' everywhere in the app
+                    "lipid": display_lipid,
                     "mean_shap": mean_signed,
                     "mean_abs_shap": mean_abs,
                 }
@@ -350,6 +354,8 @@ with left_col:
                 if "fold" not in df.columns:
                     st.error("'fold' column not found in CSV.")
                 else:
+                    # Compute per-fold means and immediately switch to display-friendly
+                    # lipid names (':' instead of '_') for all downstream rendering.
                     fold_means = compute_per_fold_means(df)
                     st.session_state["fold_means"] = fold_means
                     st.session_state["raw_df"] = df
@@ -408,26 +414,35 @@ with left_col:
                 if row.empty:
                     st.warning("Selection not found in aggregated table.")
                 else:
+                    # Determine internal (underscore) and display (colon) lipid names
+                    try:
+                        lipid_internal = row["lipid_internal"].iloc[0]
+                    except KeyError:
+                        # Backward compatibility in case older cached data lacks lipid_internal
+                        lipid_internal = lipid_part.replace(":", "_")
+                    lipid_display = row["lipid"].iloc[0] if "lipid" in row.columns else lipid_part
                     raw_df = st.session_state.get("raw_df")
                     if raw_df is None:
                         st.warning("Raw data not available.")
                     elif "sample_id" not in raw_df.columns:
                         st.error("'sample_id' column not found in CSV.")
-                    elif lipid_part not in raw_df.columns:
-                        st.error(f"Lipid '{lipid_part}' not found in CSV columns.")
+                    elif lipid_internal not in raw_df.columns:
+                        st.error(
+                            f"Lipid '{lipid_display}' (internal '{lipid_internal}') not found in CSV columns."
+                        )
                     else:
-                        # Save selected lipid (API format uses ':' instead of '_')
-                        st.session_state["selected_lipid_api"] = lipid_part.replace("_", ":")
+                        # Save selected lipid for external APIs (expects ':' notation)
+                        st.session_state["selected_lipid_api"] = lipid_display
                         fold_df = raw_df[raw_df["fold"] == fold_value]
-                        vals_df = fold_df[["sample_id", lipid_part]].dropna()
+                        vals_df = fold_df[["sample_id", lipid_internal]].dropna()
                         if vals_df.empty:
                             st.warning("No SHAP values to display for the selected lipid/fold.")
                         else:
-                            vals_df = vals_df.rename(columns={lipid_part: "shap_value"})
+                            vals_df = vals_df.rename(columns={lipid_internal: "shap_value"})
                             vals_df["sample_id"] = vals_df["sample_id"].astype(str)
                             # Attach original lipid concentration values from Excel, if available
                             try:
-                                lipid_excel_name = lipid_part.replace("_", ":")
+                                lipid_excel_name = lipid_display
                                 lipid_df = load_lipid_data()
                                 if "Sample ID" in lipid_df.columns and lipid_excel_name in lipid_df.columns:
                                     meta_df = lipid_df[["Sample ID", lipid_excel_name]].rename(
@@ -438,7 +453,7 @@ with left_col:
                                 # If anything goes wrong, just fall back to plotting without color
                                 pass
                             # Create small vertical jitter so points don't overlap on a single y level
-                            seed = abs(hash(f"{lipid_part}-{fold_value}")) % (2**32)
+                            seed = abs(hash(f"{lipid_display}-{fold_value}")) % (2**32)
                             rng = np.random.default_rng(seed)
                             vals_df = vals_df.copy()
                             vals_df["jitter"] = rng.uniform(-0.3, 0.3, size=len(vals_df))
@@ -468,20 +483,24 @@ with left_col:
                             lipid_cols_all = infer_lipid_columns(raw_df)
                             fold_raw = raw_df[raw_df["fold"] == fold_value]
                             shap_matrix = fold_raw[lipid_cols_all]
-                            if lipid_part in shap_matrix.columns:
-                                target = shap_matrix[lipid_part]
+                            # Use internal (underscore) name for correlation computations
+                            target_col = lipid_internal
+                            if target_col in shap_matrix.columns:
+                                target = shap_matrix[target_col]
                                 corrs = shap_matrix.corrwith(target, method="spearman")
-                                corrs = corrs.drop(labels=[lipid_part], errors="ignore").dropna()
+                                corrs = corrs.drop(labels=[target_col], errors="ignore").dropna()
                                 if not corrs.empty:
                                     corr_df = corrs.to_frame(name="corr").reset_index().rename(columns={"index": "lipid"})
                                     corr_df["abs_corr"] = corr_df["corr"].abs()
                                     top5 = corr_df.sort_values("abs_corr", ascending=False).head(10)
                                     top5_disp = top5[["lipid", "corr"]].copy()
+                                    # Render correlated lipid names with ':' instead of '_'
+                                    top5_disp["lipid"] = top5_disp["lipid"].astype(str).str.replace("_", ":", regex=False)
                                     top5_disp["corr"] = top5_disp["corr"].round(3)
                                     # Store for display in the right pane
                                     st.session_state["corr_table"] = top5_disp
                                     st.session_state["corr_title"] = (
-                                        f"Top 10 correlated lipids (Spearman) for {lipid_part} (fold {fold_value})"
+                                        f"Top 10 correlated lipids (Spearman) for {lipid_display} (fold {fold_value})"
                                     )
             else:
                 st.warning("Could not parse fold from selection.")
@@ -494,7 +513,8 @@ with right_col:
     else:
         title = st.session_state.get("corr_title", "Top correlated lipids (Spearman)")
         st.subheader(title)
-        st.table(corr_table)
+        # st.table(corr_table.style.hide(axis="index"))
+        st.dataframe(corr_table, hide_index=True)
     st.subheader("RefMet annotation")
     selected_api_name = st.session_state.get("selected_lipid_api")
     if selected_api_name:
@@ -509,9 +529,23 @@ with right_col:
                 records = []
             if records:
                 df_info = pd.DataFrame(records)
+                # Keep only a focused subset of informative RefMet columns
+                keep_cols = [
+                    "refmet_id",
+                    "name",
+                    "exactmass",
+                    "formula",
+                    "superclass",
+                    "main_class",
+                    "sub_class",
+                ]
+                existing_cols = [c for c in keep_cols if c in df_info.columns]
+                if existing_cols:
+                    df_info = df_info[existing_cols]
                 # Remember last RefMet record(s) for use below
                 st.session_state["last_refmet_info"] = records
-                st.table(df_info)
+                # st.table(df_info.style.hide(axis="index"))
+                st.dataframe(df_info, hide_index=True)
             else:
                 st.info("No RefMet match found or API response not in expected format.")
         else:
@@ -521,7 +555,7 @@ with right_col:
 
 # --- Studies mentioning the selected lipid ---
 st.divider()
-st.header("Studies mentioning this lipid")
+st.header("Studies and KEGG pathways mentioning this lipid")
 refmet_info = st.session_state.get("last_refmet_info")
 if not refmet_info:
     st.caption("Select a lipid-fold and ensure a RefMet match is available to see related studies.")
@@ -593,66 +627,20 @@ else:
                 studies_df = studies_df.copy()
                 studies_df["Title"] = studies_df[id_col].astype(str).map(titles)
 
-            # Show a concise subset if many columns; otherwise show all
-            preferred_cols_order = [
-                "Lipid name",
-                "study_id",
-                "STUDY_ID",
-                "kegg_id",
-                "Title",
-                "Principal Investigator",
-                "Species",
-                "Study Type",
-            ]
-            preferred_cols = [c for c in preferred_cols_order if c in studies_df.columns]
-            if preferred_cols:
-                display_df = studies_df[preferred_cols]
+            # For display, keep only the study ID and title (when available)
+            if id_col is not None and "Title" in studies_df.columns:
+                display_df = studies_df[[id_col, "Title"]].rename(columns={id_col: "study_id"})
             else:
                 display_df = studies_df
 
-            # Store for downstream summary generation (use full, unpaginated table)
+            # Store for downstream summary generation (use the displayed table)
             st.session_state["last_studies_df"] = display_df
-
-            # KEGG pathways from kegg_id (if available). We query per (lipid, kegg_id)
-            # pair so we can keep track of which lipid each pathway is associated with.
-            pw_df = None
-            if "kegg_id" in studies_df.columns:
-                pw_frames: list[pd.DataFrame] = []
-                kegg_pairs = list(
-                    studies_df[["Lipid name", "kegg_id"]]
-                    .dropna()
-                    .astype(str)
-                    .drop_duplicates()
-                    .itertuples(index=False, name=None)
-                )
-                n_pairs = len(kegg_pairs)
-                kegg_progress = st.progress(0.0) if n_pairs > 0 else None
-                with st.spinner("Retrieving KEGG pathways for associated KEGG IDs..."):
-                    for i, (lipid_nm, kid) in enumerate(kegg_pairs, start=1):
-                        if not kid:
-                            continue
-                        p = get_kegg_pathways(kid)
-                        if p is None or p.empty:
-                            if kegg_progress is not None:
-                                kegg_progress.progress(min(i / n_pairs, 1.0))
-                            continue
-                        tmp = p.copy()
-                        tmp["kegg_id"] = kid
-                        tmp["Lipid name"] = lipid_nm
-                        pw_frames.append(tmp)
-                        if kegg_progress is not None:
-                            kegg_progress.progress(min(i / n_pairs, 1.0))
-                if kegg_progress is not None:
-                    kegg_progress.empty()
-                if pw_frames:
-                    pw_df = pd.concat(pw_frames, ignore_index=True)
-
-            st.session_state["last_pathways_df"] = pw_df if pw_df is not None else None
 
             # Layout: studies on the left, KEGG pathways on the right
             studies_col, pathways_col = st.columns(2)
 
             with studies_col:
+                st.subheader("Studies")
                 # Simple pagination for the studies table
                 total_rows = len(display_df)
                 page_size = 10
@@ -674,16 +662,58 @@ else:
                     f"Showing studies {start + 1}–{min(end, total_rows)} of {total_rows} "
                     f"(page {page}/{total_pages})"
                 )
-                st.table(page_df)
+                # st.table(page_df.style.hide(axis="index"))
+                st.dataframe(page_df, hide_index=True)
 
             with pathways_col:
                 st.subheader("KEGG pathways for associated KEGG IDs")
+                pw_df = None
+                if "kegg_id" in studies_df.columns:
+                    pw_frames: list[pd.DataFrame] = []
+                    kegg_pairs = list(
+                        studies_df[["Lipid name", "kegg_id"]]
+                        .dropna()
+                        .astype(str)
+                        .drop_duplicates()
+                        .itertuples(index=False, name=None)
+                    )
+                    n_pairs = len(kegg_pairs)
+                    kegg_progress = st.progress(0.0) if n_pairs > 0 else None
+                    try:
+                        with st.spinner("Retrieving KEGG pathways for associated KEGG IDs..."):
+                            for i, (lipid_nm, kid) in enumerate(kegg_pairs, start=1):
+                                if not kid:
+                                    continue
+                                p = get_kegg_pathways(kid)
+                                if p is None or p.empty:
+                                    if kegg_progress is not None:
+                                        kegg_progress.progress(min(i / n_pairs, 1.0))
+                                    continue
+                                tmp = p.copy()
+                                tmp["kegg_id"] = kid
+                                tmp["Lipid name"] = lipid_nm
+                                pw_frames.append(tmp)
+                                if kegg_progress is not None:
+                                    kegg_progress.progress(min(i / n_pairs, 1.0))
+                    except Exception:
+                        # If KEGG lookup fails for any reason, we still want the
+                        # studies table to remain visible; just skip pathways.
+                        pw_frames = []
+                    finally:
+                        if kegg_progress is not None:
+                            kegg_progress.empty()
+                    if pw_frames:
+                        pw_df = pd.concat(pw_frames, ignore_index=True)
+
+                st.session_state["last_pathways_df"] = pw_df if pw_df is not None else None
+
                 if pw_df is not None and not pw_df.empty:
                     pw_cols_order = ["Lipid name", "kegg_id", "pathway_id", "description"]
                     pw_cols = [c for c in pw_cols_order if c in pw_df.columns]
                     if not pw_cols:
                         pw_cols = list(pw_df.columns)
-                    st.table(pw_df[pw_cols])
+                    # st.table(pw_df[pw_cols].style.hide(axis="index"))
+                    st.dataframe(pw_df[pw_cols], hide_index=True)
                 else:
                     st.caption("No KEGG pathways found for the associated KEGG IDs.")
 
