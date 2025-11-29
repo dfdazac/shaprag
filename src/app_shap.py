@@ -547,7 +547,7 @@ with left_col:
                                         columns={"Sample ID": "sample_id", lipid_excel_name: "lipid_value"}
                                     )
                                     vals_df = vals_df.merge(meta_df, on="sample_id", how="left")
-                            except Exception:
+                            except Exception as e:
                                 # If anything goes wrong, just fall back to plotting without color
                                 print(f"Error loading lipid data: {e}")
                                 pass
