@@ -13,6 +13,98 @@ import urllib.parse
 import re
 
 
+def _get_secret_or_env(secret_key: str, env_var: str, default: str | None = None) -> str | None:
+    """
+    Helper to retrieve configuration values.
+    Preference order:
+      1. Streamlit secrets[secret_key]
+      2. Environment variable env_var
+      3. Default (if provided)
+    Returns None if the final value is empty.
+    """
+    value = default
+    # Try Streamlit secrets first (if available/configured)
+    try:
+        if hasattr(st, "secrets") and secret_key in st.secrets:
+            value = st.secrets[secret_key]
+    except Exception:
+        # If secrets are unavailable or misconfigured, silently ignore
+        pass
+
+    # Fall back to environment variable
+    if not value:
+        value = os.getenv(env_var, default or "")
+
+    value = (value or "").strip()
+    return value or None
+
+
+def get_app_password() -> str | None:
+    """
+    Retrieve the app password from Streamlit secrets or environment variables.
+    If no password is configured, returns None (meaning: no password protection).
+    """
+    return _get_secret_or_env("APP_PASSWORD", "APP_PASSWORD")
+
+
+def get_openai_api_key() -> str | None:
+    """
+    Retrieve the OpenAI API key from Streamlit secrets or environment variables.
+    Backwards compatible with the previous environment-variable-only approach.
+    """
+    return _get_secret_or_env("OPENAI_API_KEY", "OPENAI_API_KEY")
+
+
+def check_password() -> bool:
+    """
+    Simple password gate using Streamlit secrets or environment variables.
+
+    Behaviour:
+      - If APP_PASSWORD is not set (neither in secrets nor env), access is allowed
+        without prompting (backwards compatible with current behaviour).
+      - If APP_PASSWORD is set, users must enter it once per session.
+    """
+    password = get_app_password()
+
+    # If no password configured, allow access without gating.
+    if not password:
+        return True
+
+    def password_entered():
+        # Callback when the user submits a password.
+        entered = st.session_state.get("password_input", "")
+        if entered == password:
+            st.session_state["password_correct"] = True
+            # Remove the raw password from session_state
+            st.session_state.pop("password_input", None)
+        else:
+            st.session_state["password_correct"] = False
+
+    # First run: ask for the password.
+    if "password_correct" not in st.session_state:
+        st.text_input(
+            "Password",
+            type="password",
+            key="password_input",
+            on_change=password_entered,
+        )
+        return False
+
+    # Subsequent runs where password was incorrect.
+    if not st.session_state["password_correct"]:
+        st.text_input(
+            "Password",
+            type="password",
+            key="password_input",
+            on_change=password_entered,
+        )
+        st.error("Password incorrect")
+        return False
+
+    # Password was entered correctly earlier in the session.
+    return True
+
+
 def infer_lipid_columns(df: pd.DataFrame) -> List[str]:
     meta_cols = {
         'k',
@@ -336,6 +428,12 @@ def get_kegg_pathways(kegg_id: str) -> pd.DataFrame | None:
 
 
 st.set_page_config(layout="wide", page_title="SHAP Lipid Importance")
+
+# Gate the app behind an optional password. If no password is configured
+# (neither in Streamlit secrets nor in environment variables), this is a no-op
+# and the app behaves as before.
+if not check_password():
+    st.stop()
 left_col, right_col = st.columns(2)
 
 with left_col:
@@ -730,7 +828,7 @@ else:
 st.divider()
 st.header("Language-model summary")
 
-api_key = os.getenv("OPENAI_API_KEY")
+api_key = get_openai_api_key()
 if not api_key:
     st.caption("Set the OPENAI_API_KEY environment variable to enable language-model summaries.")
 else:
