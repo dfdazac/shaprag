@@ -549,6 +549,7 @@ with left_col:
                                     vals_df = vals_df.merge(meta_df, on="sample_id", how="left")
                             except Exception:
                                 # If anything goes wrong, just fall back to plotting without color
+                                print(f"Error loading lipid data: {e}")
                                 pass
                             # Create small vertical jitter so points don't overlap on a single y level
                             seed = abs(hash(f"{lipid_display}-{fold_value}")) % (2**32)
