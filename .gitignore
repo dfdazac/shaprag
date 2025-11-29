@@ -189,6 +189,8 @@ cython_debug/
 
 experiments/*
 !experiments/gitkeep
+# Allow this specific experiment folder (and its files) to be tracked
+!experiments/v4/2025-08-31-235806-1e9e1f/
 output/
 
 # Ignore LibreOffice lock files
