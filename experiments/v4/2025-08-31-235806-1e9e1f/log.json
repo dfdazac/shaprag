@@ -1,0 +1,52 @@
+{
+  "args": {
+    "k": 50,
+    "num_trials": 30,
+    "model_type": "xgboost",
+    "normalize": false,
+    "imputer": "min5",
+    "exclude_controls": true,
+    "vlcfas_only": true
+  },
+  "run_time": "2025-08-31-235806",
+  "random_hash": "1e9e1f",
+  "metrics": {
+    "roc_auc": {
+      "mean": 0.78,
+      "ci_low": 0.6450361220431788,
+      "ci_high": 0.9149638779568212
+    },
+    "pr_auc": {
+      "mean": 0.8057390926067397,
+      "ci_low": 0.6831031834291589,
+      "ci_high": 0.9283750017843205
+    }
+  },
+  "per_fold": [
+    {
+      "fold": 1,
+      "roc_auc": 0.6222222222222222,
+      "pr_auc": 0.7394907788290142
+    },
+    {
+      "fold": 2,
+      "roc_auc": 0.788888888888889,
+      "pr_auc": 0.795103785103785
+    },
+    {
+      "fold": 3,
+      "roc_auc": 0.9,
+      "pr_auc": 0.9288888888888888
+    },
+    {
+      "fold": 4,
+      "roc_auc": 0.8555555555555556,
+      "pr_auc": 0.8782142857142857
+    },
+    {
+      "fold": 5,
+      "roc_auc": 0.7333333333333334,
+      "pr_auc": 0.6869977244977246
+    }
+  ]
+}
