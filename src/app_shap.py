@@ -434,10 +434,24 @@ st.set_page_config(layout="wide", page_title="SHAP Lipid Importance")
 # and the app behaves as before.
 if not check_password():
     st.stop()
+
+st.markdown(
+    "The goal of this app is to understand the lipids selected by a machine learning model trained to predict adrenal insufficiency. "
+    "It explores lipid-level SHAP importance for adrenal insufficiency prediction in ALD. "
+    "A fold is one repeat of train-test splitting in cross-validation: the model is trained on most patients and tested on a held-out subset, "
+    "so each lipid-fold result shows how important that lipid was in one independent validation round. "
+    "It highlights the most influential lipid-fold signals, lets you inspect per-sample SHAP behavior, "
+    "and links selected lipids to RefMet annotations, related studies, KEGG pathways, and an optional language-model interpretation."
+)
+st.markdown(
+    "SHAP values estimate how much each lipid contributes to the model prediction for an individual patient. "
+    "Positive SHAP values push the prediction toward adrenal insufficiency, while negative values push it away; larger absolute values indicate stronger influence."
+)
 left_col, right_col = st.columns(2)
 
 with left_col:
     st.header("Top 10 Lipids by Mean |SHAP|")
+    st.write("This panel ranks lipid-fold combinations by mean absolute SHAP value, showing which features most strongly drive model predictions.")
     # Hardcoded experiment directory (temporary)
     exp_dir = "experiments/v4/2025-08-31-235806-1e9e1f"
     st.caption(f"Using experiment folder: {exp_dir}")
@@ -481,7 +495,8 @@ with left_col:
             except Exception as e:
                 st.exception(e)
 
-    st.header("Details")
+    st.header("Lipid selector")
+    st.write("Use this panel to inspect one lipid-fold in depth, including per-sample SHAP values and the strongest SHAP correlation partners within the same fold.")
     fm = st.session_state.get("fold_means")
     if fm is None or fm.empty:
         st.info("Load a valid experiment to search lipids and folds.")
@@ -606,6 +621,7 @@ with left_col:
 
 with right_col:
     st.header("Correlated lipids")
+    st.write("This panel displays the top lipids whose SHAP values co-vary with the selected lipid, helping identify related model signals.")
     corr_table = st.session_state.get("corr_table")
     if corr_table is None or corr_table.empty:
         st.info("Select a lipid-fold on the left to see correlated lipids.")
@@ -615,6 +631,7 @@ with right_col:
         # st.table(corr_table.style.hide(axis="index"))
         st.dataframe(corr_table, hide_index=True)
     st.subheader("RefMet annotation")
+    st.write("This panel retrieves RefMet metadata for the selected lipid, including curated identifiers, mass/formula, and lipid class hierarchy.")
     selected_api_name = st.session_state.get("selected_lipid_api")
     if selected_api_name:
         with st.spinner(f"Querying RefMet for '{selected_api_name}'..."):
@@ -655,6 +672,7 @@ with right_col:
 # --- Studies mentioning the selected lipid ---
 st.divider()
 st.header("Studies and KEGG pathways mentioning this lipid")
+st.write("This section gathers external evidence for matched RefMet lipids by listing relevant Metabolomics Workbench studies and linked KEGG pathways.")
 refmet_info = st.session_state.get("last_refmet_info")
 if not refmet_info:
     st.caption("Select a lipid-fold and ensure a RefMet match is available to see related studies.")
@@ -747,6 +765,7 @@ else:
 
             with studies_col:
                 st.subheader("Studies")
+                st.write("This panel lists Metabolomics Workbench studies associated with the selected lipid and provides study titles when available.")
                 # Simple pagination for the studies table
                 total_rows = len(display_df)
                 page_size = 10
@@ -773,6 +792,7 @@ else:
 
             with pathways_col:
                 st.subheader("KEGG pathways for associated KEGG IDs")
+                st.write("This panel summarizes KEGG pathways connected to associated KEGG compound IDs, providing potential biological context.")
                 pw_df = None
                 if "kegg_id" in studies_df.columns:
                     pw_frames: list[pd.DataFrame] = []
@@ -828,6 +848,7 @@ else:
 # --- Language model summary section ---
 st.divider()
 st.header("Language-model summary")
+st.write("This panel uses the selected lipid context to generate a concise, evidence-aware interpretation of potential biological relevance.")
 
 api_key = get_openai_api_key()
 if not api_key:
