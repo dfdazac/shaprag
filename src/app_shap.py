@@ -948,29 +948,41 @@ Avoid speculation that is not grounded in the provided information; when extrapo
         unsafe_allow_html=True,
     )
 
+    # Cache summaries by prompt so repeated clicks with identical context
+    # do not trigger another language-model call.
+    if "lm_summary_cache" not in st.session_state:
+        st.session_state["lm_summary_cache"] = {}
+
     if st.button("Generate summary with language model"):
         try:
-            client = openai.OpenAI(
-                api_key=api_key,
-                base_url="https://ai-research-proxy.azurewebsites.net",
-            )
-            placeholder = st.empty()
-            full_text = ""
-            with st.spinner("Calling language model..."):
-                for chunk in client.chat.completions.create(
-                    model="gpt-4-turbo",
-                    messages=[{"role": "user", "content": prompt.strip()}],
-                    stream=True,
-                ):
-                    choice = chunk.choices[0]
-                    delta = getattr(choice, "delta", None)
-                    if delta is None:
-                        continue
-                    content = delta.content or ""
-                    if not content:
-                        continue
-                    full_text += content
-                    placeholder.markdown(full_text)
+            prompt_key = prompt.strip()
+            cached_summary = st.session_state["lm_summary_cache"].get(prompt_key)
+            if cached_summary:
+                st.info("Using cached summary for the current selection.")
+                st.markdown(cached_summary)
+            else:
+                client = openai.OpenAI(
+                    api_key=api_key
+                )
+                placeholder = st.empty()
+                full_text = ""
+                with st.spinner("Calling language model..."):
+                    for chunk in client.chat.completions.create(
+                        model="gpt-5.1",
+                        messages=[{"role": "user", "content": prompt_key}],
+                        stream=True,
+                    ):
+                        choice = chunk.choices[0]
+                        delta = getattr(choice, "delta", None)
+                        if delta is None:
+                            continue
+                        content = delta.content or ""
+                        if not content:
+                            continue
+                        full_text += content
+                        placeholder.markdown(full_text)
+                if full_text.strip():
+                    st.session_state["lm_summary_cache"][prompt_key] = full_text
         except Exception as e:
             st.error(f"Error while calling language model: {e}")
 
