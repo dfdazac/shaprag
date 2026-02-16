@@ -450,7 +450,7 @@ st.markdown(
 left_col, right_col = st.columns(2)
 
 with left_col:
-    st.header("Top 10 Lipids by Mean |SHAP|")
+    st.header("(1) Top 10 Lipids by Mean |SHAP|")
     st.write("This panel ranks lipid-fold combinations by mean absolute SHAP value, showing which features most strongly drive model predictions.")
     # Hardcoded experiment directory (temporary)
     exp_dir = "experiments/v4/2025-08-31-235806-1e9e1f"
@@ -495,7 +495,7 @@ with left_col:
             except Exception as e:
                 st.exception(e)
 
-    st.header("Lipid selector")
+    st.header("(2) Lipid selector")
     st.write("Use this panel to inspect one lipid-fold in depth, including per-sample SHAP values and the strongest SHAP correlation partners within the same fold.")
     fm = st.session_state.get("fold_means")
     if fm is None or fm.empty:
@@ -620,7 +620,7 @@ with left_col:
                 st.warning("Could not parse fold from selection.")
 
 with right_col:
-    st.header("Correlated lipids")
+    st.header("(3) Correlated lipids")
     st.write("This panel displays the top lipids whose SHAP values co-vary with the selected lipid, helping identify related model signals.")
     corr_table = st.session_state.get("corr_table")
     if corr_table is None or corr_table.empty:
@@ -630,7 +630,7 @@ with right_col:
         st.subheader(title)
         # st.table(corr_table.style.hide(axis="index"))
         st.dataframe(corr_table, hide_index=True)
-    st.subheader("RefMet annotation")
+    st.subheader("(4) RefMet annotation")
     st.write("This panel retrieves RefMet metadata for the selected lipid, including curated identifiers, mass/formula, and lipid class hierarchy.")
     selected_api_name = st.session_state.get("selected_lipid_api")
     if selected_api_name:
@@ -671,7 +671,7 @@ with right_col:
 
 # --- Studies mentioning the selected lipid ---
 st.divider()
-st.header("Studies and KEGG pathways mentioning this lipid")
+st.header("(5) Studies and KEGG pathways mentioning this lipid")
 st.write("This section gathers external evidence for matched RefMet lipids by listing relevant Metabolomics Workbench studies and linked KEGG pathways.")
 refmet_info = st.session_state.get("last_refmet_info")
 if not refmet_info:
@@ -764,7 +764,7 @@ else:
             studies_col, pathways_col = st.columns(2)
 
             with studies_col:
-                st.subheader("Studies")
+                st.subheader("(5) Studies")
                 st.write("This panel lists Metabolomics Workbench studies associated with the selected lipid and provides study titles when available.")
                 # Simple pagination for the studies table
                 total_rows = len(display_df)
@@ -847,7 +847,7 @@ else:
 
 # --- Language model summary section ---
 st.divider()
-st.header("Language-model summary")
+st.header("(6) Language-model summary")
 st.write("This panel uses the selected lipid context to generate a concise, evidence-aware interpretation of potential biological relevance.")
 
 api_key = get_openai_api_key()
@@ -929,6 +929,24 @@ Write a brief text summarizing the results in the following sections:
 - and how the listed studies and pathways could contextualize or support these interpretations.
 Avoid speculation that is not grounded in the provided information; when extrapolating, use cautious language ("may", "could", "suggests"). The overall goal is to contextualize the lipid of interest in the context of adrenal insufficiency in ALD.
 """
+
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stButton"] > button {
+            background-color: #2e7d32;
+            color: white;
+            border: 1px solid #2e7d32;
+        }
+        div[data-testid="stButton"] > button:hover {
+            background-color: #1b5e20;
+            color: white;
+            border: 1px solid #1b5e20;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
     if st.button("Generate summary with language model"):
         try:
