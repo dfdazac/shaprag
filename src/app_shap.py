@@ -1,3 +1,4 @@
+import argparse
 import os
 import time
 import pickle
@@ -11,6 +12,23 @@ import streamlit as st
 import requests
 import urllib.parse
 import re
+
+
+DEFAULT_EXP_DIR = "experiments/v4/2025-08-31-235806-1e9e1f"
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument(
+        "--exp_dir",
+        default=DEFAULT_EXP_DIR,
+        help="Path to an experiment directory containing instance_shap_table.csv",
+    )
+    args, _ = parser.parse_known_args()
+    return args
+
+
+APP_ARGS = parse_args()
 
 
 def _get_secret_or_env(secret_key: str, env_var: str, default: str | None = None) -> str | None:
@@ -457,8 +475,7 @@ left_col, right_col = st.columns(2)
 with left_col:
     st.header("(1) Top 10 Lipids by Mean |SHAP|")
     st.write("This panel ranks lipid-fold combinations by mean absolute SHAP value, showing which features most strongly drive model predictions.")
-    # Hardcoded experiment directory (temporary)
-    exp_dir = "experiments/v4/2025-08-31-235806-1e9e1f"
+    exp_dir = APP_ARGS.exp_dir
     st.caption(f"Using experiment folder: {exp_dir}")
     csv_path = os.path.join(exp_dir, "instance_shap_table.csv")
 

@@ -1,147 +1,105 @@
-Analysis of the data presented in [Jaspers, Yorrick RJ, et al. "Lipidomic biomarkers in plasma correlate with disease severity in adrenoleukodystrophy." Communications Medicine 4.1 (2024): 175.](https://www.nature.com/articles/s43856-024-00605-9).
+# :mag::dna: SHAP-RAG
+
+SHAP-RAG is a retrieval-augmented framework for interpreting machine-learning models trained on lipidomics data. The central idea is that feature attribution alone is often not enough: SHAP values identify which lipids influence a model's predictions, but they do not by themselves explain how those lipids relate to known biochemical entities, prior studies, or broader biological pathways. SHAP-RAG addresses that gap by combining SHAP-based model explanations with structured retrieval from external databases and an optional language-model synthesis step.
+
+This repository accompanies our work on lipidomic prediction and interpretation in X-linked adrenoleukodystrophy (ALD). The SHAP-RAG paper has been accepted at the 2026 International Conference on Artificial Intelligence in Medicine.
 
 ## Overview
 
-This repository provides code to predict the presence of adrenal insufficiency from lipidomics data and to interpret the resulting models:
-- **Single experiments**: nested cross-validation with feature selection and SHAP for one model configuration (`src/predict.py`).
-- **Experiment sweeps**: run many configurations in parallel (`run_experiments.py`).
-- **Result summaries**: pick the best configuration per model and aggregate SHAP importances (`src/print_best_per_model.py`, `src/aggregate_importances.py`).
-- **Interactive web app**: explore SHAP results and enrich them with online databases (`src/app_shap.py`).
+The workflow has two components.
 
-Models supported: Random Forest, LightGBM, CatBoost, XGBoost, and TabPFN.
+1. [`src/predict.py`](src/predict.py) trains a predictive model, evaluates it with nested cross-validation, and exports SHAP values at both feature and sample level.
+2. [`src/app_shap.py`](src/app_shap.py) provides an interactive interface for exploring those SHAP results and enriching them with RefMet annotations, Metabolomics Workbench studies, KEGG pathways, and an optional LLM-generated summary.
+
+The goal is interpretability in a practical research setting: to move from "this lipid is important for the model" toward "this lipid is important, and here is the external context that may help explain why."
 
 ## Installation
 
-- **Python**: recommended Python ≥ 3.10.
-- **Install dependencies**:
+Python 3.10 or newer is recommended.
 
 ```bash
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
-pip install scikit-learn imbalanced-learn optuna shap matplotlib catboost lightgbm xgboost tabpfn tqdm
+pip install scikit-learn imbalanced-learn optuna shap matplotlib catboost lightgbm xgboost tabpfn openpyxl tqdm
 ```
 
-## Data
+## Data and configuration
 
-- Place the main Excel file as:
-  - `data/SupplementaryData1-with-age.xlsx` (sheet `lipidomics_data_males` is used).
-- VLCFA-only analyses additionally use:
-  - `data/vlcfas.csv` (list of VLCFA lipid columns).
+The repository includes the lipidomics data used in our experiments, derived from the supplementary material of [Jaspers, Yorrick RJ, et al. "Lipidomic biomarkers in plasma correlate with disease severity in adrenoleukodystrophy."](https://www.nature.com/articles/s43856-024-00605-9). The training pipeline reads `data/SupplementaryData1-with-age.xlsx`, using sheet `lipidomics_data_males`. VLCFA-restricted analyses use `data/vlcfas.csv`.
 
-## 1. Single experiment (`src/predict.py`)
+The interpretation interface can use the following environment variables:
 
-This script runs nested cross-validation, performs feature selection, fits the chosen model, and computes SHAP values.
+```bash
+export OPENAI_API_KEY="your-openai-key"
+export LLM_API_URL="https://your-openai-compatible-endpoint/v1"  # optional
+export APP_PASSWORD="your-password"  # optional
+```
+
+`OPENAI_API_KEY` enables language-model summaries. `LLM_API_URL` allows use of an OpenAI-compatible endpoint. `APP_PASSWORD` protects the Streamlit interface with a simple password gate.
+
+## Pipeline
+
+### Model training and SHAP export
+
+[`src/predict.py`](src/predict.py) performs nested cross-validation for adrenal-insufficiency prediction, applies imputation and optional normalization, selects lipid features, tunes hyperparameters, and writes SHAP outputs for downstream interpretation.
+
+Example:
 
 ```bash
 python src/predict.py \
-  --model_type {rf,lightgbm,catboost,xgboost,tabpfn} \
+  --model_type lightgbm \
   --k 100 \
   --num_trials 30 \
-  --imputer {knn,min5} \
-  [--normalize] \
-  [--exclude_controls] \
-  [--vlcfas_only]
+  --imputer knn \
+  --normalize
 ```
 
-- **`--model_type`**: classifier to use (default: `lightgbm`).
-- **`--k`**: number of top features selected by mutual information (default: `100`).
-- **`--num_trials`**: Optuna trials for hyperparameter tuning (ignored for TabPFN).
-- **`--imputer`**: missing-value imputer: `knn` (default) or `min5`.
-- **`--normalize`**: apply z-score normalization after imputation.
-- **`--exclude_controls`**: drop rows where `Presence of adrenal insufficiency` is `Control`.
-- **`--vlcfas_only`**: restrict features to VLCFA lipids listed in `data/vlcfas.csv` plus age.
+Supported model backends are `rf`, `lightgbm`, `catboost`, `xgboost`, and `tabpfn`.
 
-**Outputs** (per run, in `experiments/YYYY-MM-DD-HHMMSS-<hash>/`):
-- `log.json`: configuration, per-fold metrics, and 95% CIs.
-- `{model_type}_{fold}_shap_summary.png`: SHAP summary plot for each outer fold (non-TabPFN models).
-- `{model_type}_{fold}_shap_feature_importance.csv`: mean |SHAP| per feature.
-- `instance_shap_table.csv`: per-sample SHAP values for all lipids and folds (used by the web app).
+Main arguments:
 
-## 2. Multiple experiments (`run_experiments.py`)
+- `--k`: number of lipid features retained before reintroducing age.
+- `--num_trials`: number of Optuna trials used for hyperparameter search.
+- `--imputer`: imputation strategy, either `knn` or `min5`.
+- `--normalize`: apply z-score normalization after imputation.
+- `--exclude_controls`: exclude samples labeled `Control`.
+- `--vlcfas_only`: restrict the feature space to VLCFA lipids plus age.
 
-This script sweeps over many model/feature/imputer settings by repeatedly calling `src/predict.py` in parallel.
+Each run creates a timestamped directory under `experiments/` containing:
+
+- `log.json`: run configuration and cross-validation metrics.
+- `*_shap_summary.png`: SHAP summary plot for each fold.
+- `*_shap_feature_importance.csv`: fold-level mean absolute SHAP importances.
+- `instance_shap_table.csv`: per-sample SHAP values used by the interface.
+
+### Interactive interpretation with SHAP-RAG
+
+[`src/app_shap.py`](src/app_shap.py) consumes the `instance_shap_table.csv` output from a completed training run. The experiment directory is supplied at launch time:
 
 ```bash
-python run_experiments.py
+streamlit run src/app_shap.py -- \
+  --exp_dir experiments/v4/2025-08-31-235806-1e9e1f
 ```
 
-- The grid is defined at the top of `run_experiments.py` (`k_values`, `model_types`, `normalize_options`, `imputer_options`).
-- At most `MAX_PARALLEL` jobs run concurrently (default: 4).
-- Each run creates its own subfolder under `experiments/` with the same structure as above.
+The repository already includes this experiment directory, which can be used directly as a reproducible example.
 
-## 3. Analysing experiment results
+The application supports:
 
-### 3.1 Best-performing configuration per model (`src/print_best_per_model.py`)
+- ranking lipids by mean absolute SHAP value,
+- inspecting per-sample SHAP values for a selected lipid and fold,
+- identifying lipids with correlated SHAP profiles,
+- retrieving RefMet annotations,
+- listing related studies from Metabolomics Workbench,
+- retrieving associated KEGG pathways when available,
+- generating a short, evidence-aware language-model summary from the retrieved context.
 
-Given a directory containing many experiment folders (e.g. `experiments/v4`), this script finds, for each model type, the run with the highest mean ROC AUC.
+## Repository structure
 
-```bash
-# From the repository root
-python src/print_best_per_model.py experiments/v4 --k 100
-```
+- [`src/predict.py`](src/predict.py): model training, evaluation, feature selection, and SHAP generation.
+- [`src/app_shap.py`](src/app_shap.py): interactive SHAP-RAG interpretation interface.
+- [`run_experiments.py`](run_experiments.py): utility for sweeping multiple model configurations.
 
-- **Positional `base_dir`**: folder containing experiment subdirectories (default: `.`).
-- **`--k`** (optional): only include runs with this `k` value.
+## Scope
 
-It prints, per model:
-- Mean ROC AUC and 95% CI, and mean PR AUC and 95% CI.
-- The hyperparameters (`k`, `normalize`, `imputer`, `exclude_controls`, `vlcfas_only`).
-- The folder name of the best run.
-
-### 3.2 Aggregating SHAP importances (`src/aggregate_importances.py`)
-
-Aggregate and visualise SHAP feature importances from one or more experiment folders.
-
-```bash
-# Example with several experiment folders
-python src/aggregate_importances.py \
-  experiments/v4/2025-08-31-235806-1e9e1f \
-  [more folders ...] \
-  --top-k 50
-```
-
-- **Positional `folders`**: one or more experiment directories containing `*_shap_feature_importance.csv` files.
-- **`--top-k`**: number of most important features to include in the heatmaps (optional).
-
-The script:
-- Aggregates SHAP importances across folds and folders.
-- Annotates features with missing-value statistics from `data/SupplementaryData1.xlsx`.
-- Plots heatmaps of SHAP importance and missing counts, coloured by lipid class.
-- Saves `output/YYYY-MM-DD-HHMMSS/aggregated_importances.csv` with overall importance per feature.
-
-## 4. Web app for SHAP-based enrichment (`src/app_shap.py`)
-
-The Streamlit app lets you interactively explore per-lipid SHAP results and enrich them with online databases (RefMet, Metabolomics Workbench, KEGG) and an optional language-model summary.
-
-### 4.1 Prerequisites
-
-- At least one completed experiment folder with `instance_shap_table.csv` (from `src/predict.py`).
-- In `src/app_shap.py`, set the `exp_dir` variable to point to that folder, for example:
-
-```python
-exp_dir = "experiments/v4/2025-08-31-235806-1e9e1f"
-```
-
-- Environment variables (optional but recommended):
-
-```bash
-# Required for language-model summaries
-export OPENAI_API_KEY="your-openai-key"
-
-# Optional for OpenAI-compatible providers; must be the API base URL
-# Example:
-export LLM_API_URL="https://your-llm-provider.example.com/v1"
-```
-
-### 4.2 Running the app
-
-From the repository root:
-
-```bash
-streamlit run src/app_shap.py
-```
-
-The app will:
-- Show the top lipids by mean |SHAP| across folds for the selected experiment.
-- Allow selection of a lipid and fold to inspect per-sample SHAP values and correlations with other lipids.
-- Query RefMet, Metabolomics Workbench, and KEGG for functional context.
-- Optionally generate a concise, text-based interpretation using the OpenAI API.
+This codebase is intended as a research system for model interpretation and hypothesis generation. The retrieved evidence and generated summaries are designed to support expert analysis; they should not be treated as causal or clinical conclusions in isolation.
