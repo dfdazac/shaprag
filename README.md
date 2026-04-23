@@ -126,6 +126,10 @@ exp_dir = "experiments/v4/2025-08-31-235806-1e9e1f"
 ```bash
 # Required for language-model summaries
 export OPENAI_API_KEY="your-openai-key"
+
+# Optional for OpenAI-compatible providers; must be the API base URL
+# Example:
+export LLM_API_URL="https://your-llm-provider.example.com/v1"
 ```
 
 ### 4.2 Running the app

@@ -55,6 +55,11 @@ def get_openai_api_key() -> str | None:
     return _get_secret_or_env("OPENAI_API_KEY", "OPENAI_API_KEY")
 
 
+def get_llm_api_url() -> str | None:
+    """Retrieve the optional LLM API base URL from env or Streamlit secrets."""
+    return _get_secret_or_env("LLM_API_URL", "LLM_API_URL")
+
+
 def check_password() -> bool:
     """
     Simple password gate using Streamlit secrets or environment variables.
@@ -854,6 +859,9 @@ api_key = get_openai_api_key()
 if not api_key:
     st.caption("Set the OPENAI_API_KEY environment variable to enable language-model summaries.")
 else:
+    llm_api_url = get_llm_api_url()
+    st.caption("Optionally set LLM_API_URL to an OpenAI-compatible API base URL.")
+
     # Gather context pieces
     corr_table = st.session_state.get("corr_table")
     refmet_info_any = st.session_state.get("last_refmet_info")
@@ -962,7 +970,8 @@ Avoid speculation that is not grounded in the provided information; when extrapo
                 st.markdown(cached_summary)
             else:
                 client = openai.OpenAI(
-                    api_key=api_key
+                    api_key=api_key,
+                    base_url=llm_api_url,
                 )
                 placeholder = st.empty()
                 full_text = ""
@@ -985,4 +994,3 @@ Avoid speculation that is not grounded in the provided information; when extrapo
                     st.session_state["lm_summary_cache"][prompt_key] = full_text
         except Exception as e:
             st.error(f"Error while calling language model: {e}")
-
