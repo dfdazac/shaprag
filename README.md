@@ -21,7 +21,6 @@ Python 3.10 or newer is recommended.
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-pip install scikit-learn imbalanced-learn optuna shap matplotlib catboost lightgbm xgboost tabpfn openpyxl tqdm
 ```
 
 ## Data and configuration
