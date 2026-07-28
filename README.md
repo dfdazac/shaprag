@@ -2,7 +2,18 @@
 
 SHAP-RAG is a retrieval-augmented framework for interpreting machine-learning models trained on lipidomics data. The central idea is that feature attribution alone is often not enough: SHAP values identify which lipids influence a model's predictions, but they do not by themselves explain how those lipids relate to known biochemical entities, prior studies, or broader biological pathways. SHAP-RAG addresses that gap by combining SHAP-based model explanations with structured retrieval from external databases and an optional language-model synthesis step.
 
-This repository accompanies our work on lipidomic prediction and interpretation in X-linked adrenoleukodystrophy (ALD). The SHAP-RAG paper has been accepted at the 2026 International Conference on Artificial Intelligence in Medicine.
+This repository accompanies our work on lipidomic prediction and interpretation in X-linked adrenoleukodystrophy (ALD). The SHAP-RAG paper has been accepted at the 2026 International Conference on Artificial Intelligence in Medicine. If you find our work useful, please use the following citation:
+
+```bibtex
+@inproceedings{daza2026contextualized,
+  title={Contextualized Interpretation of Machine-Learning Predictions in Rare Disease Omics: Integrating SHAP, Biomedical Knowledge, and Language Models},
+  author={Daza, Daniel and Jaspers, Yorrick and Bernardi, Alberto and Costabello, Luca and Gueret, Christophe and Cochez, Michael and Engelen, Marc and Kemp, Stephan and Schut, Martijn},
+  booktitle={International Conference on Artificial Intelligence in Medicine},
+  pages={399--403},
+  year={2026},
+  organization={Springer Nature Switzerland Cham}
+}
+```
 
 ## Overview
 
